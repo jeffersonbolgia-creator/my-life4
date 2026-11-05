@@ -1,0 +1,106 @@
+name: Compilar MY LIFE
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: compilar-mylife
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Buscar el proyecto (zip o carpeta)
+        run: |
+          set -e
+          ZIP=$(ls *.zip 2>/dev/null | head -1 || true)
+          if [ -n "$ZIP" ]; then
+            echo "Encontrado: $ZIP"
+            mkdir -p _src && unzip -q -o "$ZIP" -d _src
+            BASE=_src
+          else
+            BASE=.
+          fi
+          APPJSON=$(find "$BASE" -maxdepth 4 -name app.json -not -path "*/node_modules/*" | head -1)
+          if [ -z "$APPJSON" ]; then echo "No encontré el proyecto (falta app.json)"; exit 1; fi
+          echo "PROJ=$(dirname "$APPJSON")" >> "$GITHUB_ENV"
+          echo "Proyecto en: $(dirname "$APPJSON")"
+
+      - name: Preparar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Instalar dependencias
+        working-directory: ${{ env.PROJ }}
+        run: |
+          npm install --no-audit --no-fund
+          npx expo install react react-native react-native-svg react-native-safe-area-context react-native-screens \
+            expo-sqlite expo-notifications expo-secure-store expo-local-authentication expo-crypto expo-file-system \
+            expo-sharing expo-document-picker expo-linear-gradient expo-haptics expo-status-bar expo-splash-screen \
+            expo-system-ui expo-font expo-constants expo-intent-launcher @expo-google-fonts/inter \
+            @react-native-community/datetimepicker expo-background-task expo-task-manager expo-audio
+          npx expo install --fix || true
+          npx expo install --check || true
+
+      - name: Pruebas automáticas (lógica, base de datos, PIN, finanzas, notificaciones, módulos, rutinas, cuenta regresiva, búsqueda)
+        working-directory: ${{ env.PROJ }}
+        env:
+          TZ: America/Argentina/Buenos_Aires
+        run: npm test
+
+      - name: Revisión de tipos (informativa)
+        working-directory: ${{ env.PROJ }}
+        continue-on-error: true
+        run: npx tsc --noEmit
+
+      - name: Generar proyecto Android
+        working-directory: ${{ env.PROJ }}
+        run: |
+          npx expo prebuild --platform android --no-install --clean
+          sed -i 's/^reactNativeArchitectures=.*/reactNativeArchitectures=armeabi-v7a,arm64-v8a/' android/gradle.properties
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g/' android/gradle.properties
+          grep -E "reactNativeArchitectures|jvmargs|newArch" android/gradle.properties || true
+
+      - name: Compilar APK
+        working-directory: ${{ env.PROJ }}/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Preparar archivo
+        run: |
+          mkdir -p salida
+          cp "$PROJ/android/app/build/outputs/apk/release/app-release.apk" "salida/MyLife.apk"
+          ls -la salida
+
+      - name: Guardar APK como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyLife-APK
+          path: salida/MyLife.apk
+
+      - name: Publicar para descargar desde el celular
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.1.${{ github.run_number }}
+          name: MY LIFE 2.1 (compilación ${{ github.run_number }})
+          body: |
+            Tocá **MyLife.apk** para descargarlo e instalarlo en tu Android.
+          files: salida/MyLife.apk
+          make_latest: true
